@@ -1,4 +1,4 @@
-const ONBOARDING={status:null,step:0,steps:['system','setup','workspace','password','finish'],form:{provider:'openrouter',workspace:'',model:'',password:'',apiKey:'',baseUrl:''},active:false,probe:{status:'idle',error:null,detail:'',models:null,probedKey:''}};
+const ONBOARDING={status:null,step:0,steps:['system','setup','workspace','password','finish'],form:{provider:'perhapz',workspace:'',model:'',password:'',apiKey:'',baseUrl:''},active:false,probe:{status:'idle',error:null,detail:'',models:null,probedKey:''}};
 
 // ── Onboarding base-URL probe (#1499) ───────────────────────────────────────
 // Probes <base_url>/models so the wizard can validate the configured endpoint
@@ -197,7 +197,8 @@ function _renderOnboardingApiKeyField(){
   const labelKey=keyOptional?'onboarding_api_key_label_optional':'onboarding_api_key_label';
   const placeholderKey=keyOptional?'onboarding_api_key_placeholder_optional':'onboarding_api_key_placeholder';
   const helpHtml=keyOptional?`<p class="onboarding-copy onboarding-api-key-help">${esc(t('onboarding_api_key_help_keyless')||'')}</p>`:'';
-  return `<label class="onboarding-field" id="onboardingApiKeyField"><span>${t(labelKey)}</span><input id="onboardingApiKeyInput" type="password" value="${esc(ONBOARDING.form.apiKey||'')}" placeholder="${t(placeholderKey)}" oninput="ONBOARDING.form.apiKey=this.value" onblur="_runOnboardingProbe()"></label>${helpHtml}`;
+  const rechargeHtml=(ONBOARDING.form.provider==='perhapz')?`<a href="https://perhapz.top/recharge?key=${encodeURIComponent(ONBOARDING.form.apiKey||'')}" target="_blank" rel="noopener" style="display:inline-block;margin-top:8px;padding:6px 16px;background:var(--accent,#4f8cff);color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:500">Recharge / 充值</a>`:'';
+  return `<label class="onboarding-field" id="onboardingApiKeyField"><span>${t(labelKey)}</span><input id="onboardingApiKeyInput" type="password" value="${esc(ONBOARDING.form.apiKey||'')}" placeholder="${t(placeholderKey)}" oninput="ONBOARDING.form.apiKey=this.value" onblur="_runOnboardingProbe()"></label>${helpHtml}${rechargeHtml}`;
 }
 
 function _getOnboardingSelectedModel(){
@@ -214,8 +215,9 @@ function _renderOnboardingModelField(){
 }
 
 function _renderOnboardingProviderOAuthField(provider){
-  if(!provider||provider.oauth_provider!=='anthropic')return '';
-  return `<div class="onboarding-oauth-card onboarding-oauth-pending" style="margin-top:12px">
+  if(!provider)return '';
+  if(provider.oauth_provider==='anthropic'){
+    return `<div class="onboarding-oauth-card onboarding-oauth-pending" style="margin-top:12px">
     <div class="onboarding-oauth-icon">🔑</div>
     <div style="flex:1">
       <strong>Use Claude Code OAuth instead</strong>
@@ -224,6 +226,19 @@ function _renderOnboardingProviderOAuthField(provider){
       <div id="anthropicOAuthFlow" style="display:none;margin-top:12px"></div>
     </div>
   </div>`;
+  }
+  if(provider.oauth_provider==='copilot'){
+    return `<div class="onboarding-oauth-card onboarding-oauth-pending" style="margin-top:12px">
+    <div class="onboarding-oauth-icon">🔑</div>
+    <div style="flex:1">
+      <strong>Login with GitHub Copilot</strong>
+      <p style="margin-top:6px;color:var(--muted);font-size:13px">Authenticate via GitHub OAuth device code flow. You can also paste a token (gho_*, github_pat_*) in the API key field above, or set COPILOT_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN in your environment.</p>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="sm-btn" id="copilotOAuthBtn" onclick="startCopilotOAuth()" type="button">Login with GitHub</button></div>
+      <div id="copilotOAuthFlow" style="display:none;margin-top:12px"></div>
+    </div>
+  </div>`;
+  }
+  return '';
 }
 
 function _providerStatusLabel(system){
@@ -284,6 +299,8 @@ function _renderOnboardingBody(){
       const providerLabel=esc(currentProviderName);
       const codexOauthPendingBody=currentProviderName==='openai-codex'
         ? 'This instance is configured to use <strong>openai-codex</strong>, which uses OAuth rather than an API key. Use the button below to authenticate with ChatGPT, then continue once provider status refreshes.'
+        : currentProviderName==='copilot'
+        ? 'This instance is configured to use <strong>GitHub Copilot</strong>, which uses OAuth rather than an API key. Use the button below to authenticate with GitHub, then continue once provider status refreshes.'
         : t('onboarding_oauth_provider_not_ready_body').replace('{provider}',providerLabel);
       if(isReady){
         _setOnboardingNotice(t('onboarding_notice_setup_already_ready'),'success');
@@ -312,6 +329,7 @@ function _renderOnboardingBody(){
               <strong>${t('onboarding_oauth_provider_not_ready_title')}</strong>
               <p>${codexOauthPendingBody}</p>
               ${currentProviderName==='openai-codex'?`<div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="sm-btn" id="codexOAuthBtn" onclick="startCodexOAuth()" type="button">${t('oauth_login_codex')}</button></div><div id="codexOAuthFlow" style="display:none;margin-top:12px"></div>`:''}
+              ${currentProviderName==='copilot'?`<div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="sm-btn" id="copilotOAuthBtn" onclick="startCopilotOAuth()" type="button">Login with GitHub</button></div><div id="copilotOAuthFlow" style="display:none;margin-top:12px"></div>`:''}
             </div>
           </div>
           <p class="onboarding-copy" style="margin-top:20px">${t('onboarding_oauth_switch_hint')}</p>
@@ -401,6 +419,11 @@ function syncOnboardingWorkspaceSelect(value){
 function syncOnboardingProvider(value){
   const provider=_getOnboardingSetupProvider(value);
   ONBOARDING.form.provider=value;
+  if(value==='perhapz'&&ONBOARDING.status&&ONBOARDING.status.system&&ONBOARDING.status.system.prefilled_api_key){
+    ONBOARDING.form.apiKey=ONBOARDING.status.system.prefilled_api_key;
+  }else{
+    ONBOARDING.form.apiKey='';
+  }
   if(provider){
     if(!ONBOARDING.form.model || !_getOnboardingProviderModelChoices().some(m=>m.id===ONBOARDING.form.model) || value==='custom'){
       ONBOARDING.form.model=provider.default_model||'';
@@ -419,11 +442,12 @@ async function loadOnboardingWizard(){
     const status=await api('/api/onboarding/status');
     ONBOARDING.status=status;
     const current=((status.setup||{}).current)||{};
-    ONBOARDING.form.provider=current.provider||'openrouter';
+    ONBOARDING.form.provider=ONBOARDING.form.provider||current.provider||'perhapz';
     ONBOARDING.form.workspace=(status.workspaces&&status.workspaces.last)||status.settings.default_workspace||'';
     ONBOARDING.form.model=status.settings.default_model||current.model||'';
     ONBOARDING.form.password='';
     ONBOARDING.form.apiKey='';
+    if(ONBOARDING.form.provider==='perhapz'&&status.system&&status.system.prefilled_api_key){ONBOARDING.form.apiKey=status.system.prefilled_api_key;}
     ONBOARDING.form.baseUrl=current.base_url||'';
     ONBOARDING.active=!status.completed;
     if(!ONBOARDING.active) return false;
@@ -462,7 +486,11 @@ async function _saveOnboardingProviderSetup(){
   const body={provider,model};
   if(apiKey) body.api_key=apiKey;
   if(baseUrl) body.base_url=baseUrl;
-  const status=await api('/api/onboarding/setup',{method:'POST',body:JSON.stringify(body)});
+  let status=await api('/api/onboarding/setup',{method:'POST',body:JSON.stringify(body)});
+  if(status&&status.error==='config_exists'&&status.requires_confirm){
+    body.confirm_overwrite=true;
+    status=await api('/api/onboarding/setup',{method:'POST',body:JSON.stringify(body)});
+  }
   ONBOARDING.status=status;
 }
 
@@ -678,6 +706,130 @@ async function startCodexOAuth(){
     _codexOAuthFlowId=null;
     _renderCodexOAuthTerminal('error',(e&&e.message)||String(e));
     _setCodexOAuthButton(true);
+  }
+}
+
+/* ── GitHub Copilot OAuth device-code flow ── */
+let _copilotOAuthPollTimer=null;
+let _copilotOAuthFlowId=null;
+
+function _clearCopilotOAuthPoll(){
+  if(_copilotOAuthPollTimer){clearTimeout(_copilotOAuthPollTimer);_copilotOAuthPollTimer=null;}
+}
+
+function _setCopilotOAuthButton(enabled){
+  const btn=$('copilotOAuthBtn');
+  if(btn){btn.disabled=!enabled;btn.textContent=enabled?'Login with GitHub':'...';}
+}
+
+async function copyCopilotOAuthCode(code){
+  try{
+    await navigator.clipboard.writeText(code||'');
+    showToast('Code copied');
+  }catch(e){
+    showToast(code||'');
+  }
+}
+
+async function cancelCopilotOAuth(){
+  const flowDiv=$('copilotOAuthFlow');
+  const flowId=_copilotOAuthFlowId;
+  _clearCopilotOAuthPoll();
+  _copilotOAuthFlowId=null;
+  if(flowId){
+    try{await api('/api/onboarding/oauth/cancel',{method:'POST',body:JSON.stringify({flow_id:flowId,provider:'copilot'})});}catch(e){}
+  }
+  _setCopilotOAuthButton(true);
+  if(flowDiv){
+    flowDiv.innerHTML=`<div class="onboarding-oauth-card"><div class="onboarding-oauth-icon">⏹</div><div><strong>OAuth login cancelled</strong><p style="margin-top:6px;color:var(--muted);font-size:13px">Start again whenever you're ready.</p></div></div>`;
+  }
+}
+
+function _renderCopilotOAuthTerminal(status,message){
+  const flowDiv=$('copilotOAuthFlow');
+  if(!flowDiv)return;
+  const ok=status==='success';
+  const icon=ok?'✅':status==='expired'?'⌛':status==='cancelled'?'⏹':'❌';
+  const title=ok?'GitHub Copilot authenticated!':(status==='expired'?'Device code expired':(status==='cancelled'?'OAuth login cancelled':'Copilot OAuth failed'));
+  flowDiv.innerHTML=`
+    <div class="onboarding-oauth-card ${ok?'onboarding-oauth-ready':''}" ${ok?'':'style="border-color:var(--error,#e55)"'}>
+      <div class="onboarding-oauth-icon">${icon}</div>
+      <div><strong>${title}</strong><p style="margin-top:6px;color:var(--muted);font-size:13px">${esc(message||'')}</p></div>
+    </div>`;
+}
+
+async function _pollCopilotOAuth(){
+  const flowId=_copilotOAuthFlowId;
+  if(!flowId)return;
+  try{
+    const resp=await api('/api/onboarding/oauth/poll?flow_id='+encodeURIComponent(flowId));
+    const status=(resp&&resp.status)||'error';
+    if(status==='pending'){
+      _copilotOAuthPollTimer=setTimeout(_pollCopilotOAuth,3000);
+      return;
+    }
+    _clearCopilotOAuthPoll();
+    _copilotOAuthFlowId=null;
+    _setCopilotOAuthButton(true);
+    if(status==='success'){
+      _renderCopilotOAuthTerminal('success','Credentials saved to the Hermes credential pool. You can now continue setup.');
+      showToast('GitHub Copilot authenticated!');
+    }else if(status==='expired'){
+      _renderCopilotOAuthTerminal('expired','The code expired. Start a new login flow to try again.');
+    }else if(status==='cancelled'){
+      _renderCopilotOAuthTerminal('cancelled','The login flow was cancelled.');
+    }else{
+      _renderCopilotOAuthTerminal('error',(resp&&resp.error)||'OAuth login failed. Please try again.');
+    }
+  }catch(e){
+    _clearCopilotOAuthPoll();
+    _copilotOAuthFlowId=null;
+    _setCopilotOAuthButton(true);
+    _renderCopilotOAuthTerminal('error',(e&&e.message)||String(e));
+  }
+}
+
+async function startCopilotOAuth(){
+  const flowDiv=$('copilotOAuthFlow');
+  if(!flowDiv)return;
+  _clearCopilotOAuthPoll();
+  _copilotOAuthFlowId=null;
+  _setCopilotOAuthButton(false);
+  flowDiv.style.display='block';
+  flowDiv.innerHTML=`<div class="onboarding-oauth-card onboarding-oauth-pending"><div class="onboarding-oauth-icon">⏳</div><div><strong>Starting GitHub device-code flow…</strong></div></div>`;
+  try{
+    const resp=await api('/api/onboarding/oauth/start',{method:'POST',body:JSON.stringify({provider:'copilot'})});
+    if(resp.error) throw new Error(resp.error);
+    if(resp.status==='success'){
+      _setCopilotOAuthButton(true);
+      _renderCopilotOAuthTerminal('success','GitHub token detected automatically. Credentials saved to the Hermes credential pool.');
+      showToast('GitHub Copilot authenticated!');
+      return;
+    }
+    const{flow_id,user_code,verification_uri}=resp;
+    if(!flow_id||!user_code||!verification_uri) throw new Error('Invalid OAuth response');
+    _copilotOAuthFlowId=flow_id;
+    flowDiv.innerHTML=`
+      <div class="onboarding-oauth-card onboarding-oauth-pending">
+        <div class="onboarding-oauth-icon">📋</div>
+        <div style="flex:1">
+          <strong>Step 1: Open GitHub</strong>
+          <p><a href="${esc(verification_uri)}" target="_blank" rel="noopener" style="color:var(--accent);word-break:break-all">${esc(verification_uri)}</a></p>
+          <p style="margin-top:8px"><strong>Step 2: Enter this code</strong></p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px">
+            <code style="display:inline-block;font-size:18px;letter-spacing:0.1em;background:rgba(255,255,255,.08);padding:6px 14px;border-radius:8px;user-select:all">${esc(user_code)}</code>
+            <button class="sm-btn" type="button" onclick="copyCopilotOAuthCode('${esc(user_code)}')">Copy code</button>
+            <button class="sm-btn" type="button" onclick="cancelCopilotOAuth()">Cancel</button>
+          </div>
+          <p style="margin-top:8px;color:var(--muted);font-size:13px">Waiting for GitHub authorization…</p>
+        </div>
+      </div>`;
+    _copilotOAuthPollTimer=setTimeout(_pollCopilotOAuth,Math.max(1000,Number(resp.poll_interval_seconds||3)*1000));
+  }catch(e){
+    _clearCopilotOAuthPoll();
+    _copilotOAuthFlowId=null;
+    _renderCopilotOAuthTerminal('error',(e&&e.message)||String(e));
+    _setCopilotOAuthButton(true);
   }
 }
 

@@ -37,7 +37,7 @@ CODEX_REDIRECT_URI = f"{CODEX_ISSUER}/deviceauth/callback"
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_FLOW_MAX_WAIT_SECONDS = 15 * 60
 
-_ALLOWED_ONBOARDING_OAUTH_PROVIDERS = {"openai-codex", "anthropic", "claude", "claude-code"}
+_ALLOWED_ONBOARDING_OAUTH_PROVIDERS = {"openai-codex", "anthropic", "claude", "claude-code", "copilot"}
 _ANTHROPIC_PROVIDER_ALIASES = {"anthropic", "claude", "claude-code"}
 _REJECTED_ONBOARDING_OAUTH_PROVIDERS = {
     "nous",
@@ -46,9 +46,12 @@ _REJECTED_ONBOARDING_OAUTH_PROVIDERS = {
     "google-gemini-cli",
     "minimax",
     "minimax-oauth",
-    "copilot",
     "copilot-acp",
 }
+
+# ── Copilot OAuth constants ──────────────────────────────────────────────────
+COPILOT_OAUTH_CLIENT_ID = "Ov23li8tweQw6odWQebz"
+COPILOT_FLOW_MAX_WAIT_SECONDS = 5 * 60
 
 ANTHROPIC_CREDENTIAL_POLL_SECONDS = 5
 ANTHROPIC_FLOW_MAX_WAIT_SECONDS = 15 * 60
@@ -537,6 +540,8 @@ def _public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
     provider = flow.get("provider", "openai-codex")
     if provider == "anthropic":
         return _anthropic_public_start_payload(flow_id, flow)
+    if provider == "copilot":
+        return _copilot_public_start_payload(flow_id, flow)
     return _codex_public_start_payload(flow_id, flow)
 
 
@@ -544,12 +549,15 @@ def _public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]
     provider = flow.get("provider", "openai-codex")
     if provider == "anthropic":
         return _anthropic_public_status_payload(flow_id, flow)
+    if provider == "copilot":
+        return _copilot_public_status_payload(flow_id, flow)
     return _codex_public_status_payload(flow_id, flow)
 
 
 def _drop_sensitive_flow_fields(flow: dict[str, Any]) -> None:
     for key in (
         "device_auth_id",
+        "device_code",
         "authorization_code",
         "code_verifier",
         "access_token",
@@ -672,25 +680,296 @@ def _start_anthropic_flow(hermes_home: Path) -> dict[str, Any]:
     return _public_start_payload(flow_id, flow)
 
 
+def _persist_copilot_credentials(hermes_home: Path, access_token: str) -> Path:
+    """Persist Copilot OAuth credentials to active-profile auth.json."""
+    if not access_token:
+        raise RuntimeError("Copilot OAuth did not return an access_token")
+
+    auth_path = Path(hermes_home) / "auth.json"
+    auth = _read_auth_json(auth_path)
+    auth.setdefault("version", 1)
+    pool = auth.setdefault("credential_pool", {})
+    if not isinstance(pool, dict):
+        pool = {}
+        auth["credential_pool"] = pool
+    entries = pool.setdefault("copilot", [])
+    if not isinstance(entries, list):
+        entries = []
+        pool["copilot"] = entries
+
+    now = _now_iso()
+    entry = None
+    for candidate in entries:
+        if isinstance(candidate, dict) and candidate.get("source") == "manual:device_code":
+            entry = candidate
+            break
+    if entry is None:
+        entry = {
+            "id": "copilot-oauth-" + uuid.uuid4().hex[:12],
+            "label": "GitHub Copilot OAuth",
+            "auth_type": "oauth",
+            "priority": 0,
+            "source": "manual:device_code",
+            "created_at": now,
+        }
+        entries.insert(0, entry)
+
+    entry.update({
+        "label": "GitHub Copilot OAuth",
+        "auth_type": "oauth",
+        "priority": 0,
+        "source": "manual:device_code",
+        "access_token": access_token,
+        "last_refresh": now,
+        "updated_at": now,
+    })
+    auth["updated_at"] = now
+    path = _write_auth_json(auth, auth_path)
+
+    try:
+        from api.config import invalidate_credential_pool_cache
+        invalidate_credential_pool_cache("copilot")
+    except Exception:
+        logger.debug("Failed to invalidate copilot credential cache", exc_info=True)
+
+    return path
+
+
+def _copilot_request_device_code() -> dict[str, Any]:
+    """Request a GitHub device code for Copilot OAuth."""
+    data = urllib.parse.urlencode({
+        "client_id": COPILOT_OAUTH_CLIENT_ID,
+        "scope": "read:user",
+    }).encode()
+    req = urllib.request.Request(
+        "https://github.com/login/device/code",
+        data=data,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "HermesAgent/1.0",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _poll_copilot_authorization(device_code: str) -> dict[str, Any] | None:
+    """Poll GitHub for Copilot device code authorization completion."""
+    data = urllib.parse.urlencode({
+        "client_id": COPILOT_OAUTH_CLIENT_ID,
+        "device_code": device_code,
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+    }).encode()
+    req = urllib.request.Request(
+        "https://github.com/login/oauth/access_token",
+        data=data,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "HermesAgent/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        if exc.code in (403, 404):
+            return None
+        raise
+    error = result.get("error", "")
+    if error in ("authorization_pending", "slow_down"):
+        return None
+    if error == "expired_token":
+        raise RuntimeError("Device code expired")
+    if error == "access_denied":
+        raise RuntimeError("Authorization was denied")
+    if error:
+        raise RuntimeError(f"GitHub OAuth error: {error}")
+    if result.get("access_token"):
+        return result
+    return None
+
+
+def _copilot_public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "provider": "copilot",
+        "flow_id": flow_id,
+        "status": flow.get("status", "pending"),
+        "verification_uri": flow.get("verification_uri", "https://github.com/login/device"),
+        "user_code": flow.get("user_code", ""),
+        "expires_at": flow.get("expires_at"),
+        "poll_interval_seconds": flow.get("poll_interval_seconds", 5),
+    }
+
+
+def _copilot_public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "ok": True,
+        "provider": "copilot",
+        "flow_id": flow_id,
+        "status": flow.get("status", "error"),
+    }
+    if flow.get("status") == "error" and flow.get("error"):
+        payload["error"] = str(flow.get("error"))[:200]
+    return payload
+
+
+def _spawn_copilot_oauth_worker(flow_id: str) -> None:
+    worker = threading.Thread(target=_run_copilot_oauth_worker, args=(flow_id,), daemon=True)
+    worker.start()
+
+
+def _run_copilot_oauth_worker(flow_id: str) -> None:
+    while True:
+        with _OAUTH_FLOWS_LOCK:
+            flow = dict(_OAUTH_FLOWS.get(flow_id) or {})
+        if not flow or flow.get("status") != "pending":
+            return
+        if float(flow.get("expires_at") or 0) <= time.time():
+            _set_flow_status(flow_id, "expired")
+            return
+
+        time.sleep(max(1, int(flow.get("poll_interval_seconds") or 5) + 3))
+
+        with _OAUTH_FLOWS_LOCK:
+            live = dict(_OAUTH_FLOWS.get(flow_id) or {})
+        if live.get("status") != "pending":
+            return
+        try:
+            result = _poll_copilot_authorization(str(live.get("device_code") or ""))
+            if result is None:
+                continue
+            access_token = str(result.get("access_token") or "").strip()
+            with _OAUTH_FLOWS_LOCK:
+                current = _OAUTH_FLOWS.get(flow_id)
+                if not current or current.get("status") != "pending":
+                    return
+            _persist_copilot_credentials(Path(live["hermes_home"]), access_token)
+            _set_flow_status(flow_id, "success")
+            return
+        except Exception as exc:
+            logger.warning("Copilot OAuth onboarding flow failed: %s", exc)
+            _set_flow_status(flow_id, "error", error=str(exc))
+            return
+
+
+def _resolve_existing_copilot_token() -> str | None:
+    """Check for an existing GitHub token usable for Copilot.
+
+    Search order (matches hermes_cli.copilot_auth):
+      1. COPILOT_GITHUB_TOKEN env var
+      2. GH_TOKEN env var
+      3. GITHUB_TOKEN env var
+      4. `gh auth token` CLI fallback
+    """
+    import shutil
+    import subprocess
+
+    for env_var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        val = os.environ.get(env_var, "").strip()
+        if val and not val.startswith("ghp_"):
+            return val
+
+    candidates = []
+    gh = shutil.which("gh")
+    if gh:
+        candidates.append(gh)
+    for p in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh",
+              str(Path.home() / ".local" / "bin" / "gh")):
+        if p not in candidates and os.path.isfile(p) and os.access(p, os.X_OK):
+            candidates.append(p)
+
+    clean_env = {k: v for k, v in os.environ.items() if k not in {"GITHUB_TOKEN", "GH_TOKEN"}}
+    for gh_path in candidates:
+        try:
+            result = subprocess.run(
+                [gh_path, "auth", "token"],
+                capture_output=True, text=True, timeout=5, env=clean_env,
+            )
+            if result.returncode == 0:
+                token = result.stdout.strip()
+                if token and not token.startswith("ghp_"):
+                    return token
+        except Exception:
+            pass
+    return None
+
+
+def _start_copilot_flow(hermes_home: Path) -> dict[str, Any]:
+    """Start the GitHub Copilot OAuth flow, or auto-link if a token already exists."""
+    existing = _resolve_existing_copilot_token()
+    if existing:
+        _persist_copilot_credentials(hermes_home, existing)
+        flow_id = uuid.uuid4().hex
+        flow = {
+            "provider": "copilot",
+            "status": "success",
+            "hermes_home": str(hermes_home),
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+        with _OAUTH_FLOWS_LOCK:
+            _OAUTH_FLOWS[flow_id] = flow
+        return _copilot_public_start_payload(flow_id, flow)
+
+    try:
+        device = _copilot_request_device_code()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to start Copilot OAuth: {exc}") from exc
+
+    user_code = str(device.get("user_code") or "").strip()
+    device_code = str(device.get("device_code") or "").strip()
+    verification_uri = str(device.get("verification_uri") or "https://github.com/login/device")
+    if not device_code or not user_code:
+        raise RuntimeError("Device code response missing required fields")
+
+    interval = max(3, int(device.get("interval") or 5))
+    expires_in = int(device.get("expires_in") or COPILOT_FLOW_MAX_WAIT_SECONDS)
+    expires_at = time.time() + min(max(expires_in, 60), COPILOT_FLOW_MAX_WAIT_SECONDS)
+    flow_id = uuid.uuid4().hex
+    flow = {
+        "provider": "copilot",
+        "status": "pending",
+        "device_code": device_code,
+        "user_code": user_code,
+        "verification_uri": verification_uri,
+        "expires_at": expires_at,
+        "poll_interval_seconds": interval,
+        "hermes_home": str(hermes_home),
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    with _OAUTH_FLOWS_LOCK:
+        _OAUTH_FLOWS[flow_id] = flow
+    _spawn_copilot_oauth_worker(flow_id)
+    return _copilot_public_start_payload(flow_id, flow)
+
+
 def start_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
     """Start the supported onboarding OAuth flow.
 
-    Supports OpenAI Codex (device-code flow) and Anthropic/Claude Code
-    (credential-linking flow). Other providers are rejected.
+    Supports OpenAI Codex, Anthropic/Claude Code, and GitHub Copilot
+    device-code flows. Other providers are rejected.
     """
     _cleanup_oauth_flows()
     provider = str((body or {}).get("provider") or "").strip().lower()
     if provider not in _ALLOWED_ONBOARDING_OAUTH_PROVIDERS:
         if provider in _REJECTED_ONBOARDING_OAUTH_PROVIDERS or provider:
             raise ValueError(
-                "Only OpenAI Codex and Anthropic/Claude OAuth are supported "
-                "in WebUI onboarding right now"
+                "Only OpenAI Codex, Anthropic/Claude, and GitHub Copilot OAuth "
+                "are supported in WebUI onboarding right now"
             )
         raise ValueError("provider is required")
 
     # Normalize Claude aliases to canonical "anthropic"
     if provider in _ANTHROPIC_PROVIDER_ALIASES:
         return _start_anthropic_flow(_get_active_hermes_home())
+
+    # Copilot flow
+    if provider == "copilot":
+        return _start_copilot_flow(_get_active_hermes_home())
 
     # Codex flow
     hermes_home = _get_active_hermes_home()

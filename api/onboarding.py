@@ -34,6 +34,22 @@ logger = logging.getLogger(__name__)
 
 
 _SUPPORTED_PROVIDER_SETUPS = {
+    # ── U-Hermes default ──────────────────────────────────────────────
+    "perhapz": {
+        "label": "Perhapz (U-Hermes)",
+        "env_var": "OPENAI_API_KEY",
+        "default_model": "deepseek-v4-flash",
+        "default_base_url": "https://perhapz.top/v1",
+        "requires_base_url": False,
+        "models": [
+            {"id": "deepseek-v4-flash", "label": "DeepSeek V4 Flash"},
+            {"id": "deepseek-chat", "label": "DeepSeek V3"},
+            {"id": "qwen-plus", "label": "Qwen Plus"},
+            {"id": "qwen-turbo", "label": "Qwen Turbo"},
+        ],
+        "category": "recommended",
+        "quick": True,
+    },
     # ── Easy start ──────────────────────────────────────────────────────
     "openrouter": {
         "label": "OpenRouter",
@@ -187,17 +203,29 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "models": list(_PROVIDER_MODELS.get("xai", []) or _PROVIDER_MODELS.get("x-ai", [])),
         "category": "specialized",
     },
+    "copilot": {
+        "label": "GitHub Copilot",
+        "env_var": "COPILOT_GITHUB_TOKEN",
+        "default_model": "gpt-4o",
+        "requires_base_url": False,
+        "key_optional": True,
+        "models": list(_PROVIDER_MODELS.get("copilot", [])),
+        "category": "easy_start",
+        "oauth_provider": "copilot",
+        "oauth_label": "GitHub Copilot OAuth",
+    },
 }
 
 _PROVIDER_CATEGORIES = [
+    {"id": "recommended", "label": "Recommended", "order": -1},
     {"id": "easy_start", "label": "Easy start", "order": 0},
     {"id": "self_hosted", "label": "Open / self-hosted", "order": 1},
     {"id": "specialized", "label": "Specialized", "order": 2},
 ]
 
 _UNSUPPORTED_PROVIDER_NOTE = (
-    "Advanced provider flows such as Nous Portal and GitHub Copilot are still "
-    "terminal-first. OpenAI Codex and Anthropic Claude Code can be authenticated in this onboarding flow "
+    "Advanced provider flows such as Nous Portal are still "
+    "terminal-first. OpenAI Codex, Anthropic Claude Code, and GitHub Copilot can be authenticated in this onboarding flow "
     "when your Hermes config selects the corresponding provider."
 )
 
@@ -764,6 +792,10 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
         state = "needs_provider"
         note = "Hermes is installed, but you still need to choose a provider and save working credentials."
 
+    env_path = _get_active_hermes_home() / ".env"
+    existing_env = _load_env_file(env_path)
+    prefilled_key = existing_env.get("OPENAI_API_KEY", "")
+
     return {
         "provider_configured": provider_configured,
         "provider_ready": provider_ready,
@@ -773,12 +805,13 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
         "current_provider": provider or None,
         "current_model": model or None,
         "current_base_url": base_url or None,
-        "env_path": str(_get_active_hermes_home() / ".env"),
+        "env_path": str(env_path),
+        "prefilled_api_key": prefilled_key,
     }
 
 
 def _build_setup_catalog(cfg: dict) -> dict:
-    current_provider = _extract_current_provider(cfg) or "openrouter"
+    current_provider = _extract_current_provider(cfg) or "perhapz"
     current_model = _extract_current_model(cfg)
     current_base_url = _extract_current_base_url(cfg)
 
